@@ -1,5 +1,6 @@
 import argparse
 import os
+import pickle as pkl
 import time
 import warnings
 from collections import OrderedDict
@@ -13,6 +14,7 @@ import yaml
 from optuna.integration.skopt import SkoptSampler
 from optuna.pruners import BasePruner, MedianPruner, SuccessiveHalvingPruner
 from optuna.samplers import BaseSampler, RandomSampler, TPESampler
+from optuna.visualization import plot_optimization_history, plot_param_importances
 
 # For using HER with GoalEnv
 from stable_baselines3 import HerReplayBuffer  # noqa: F401
@@ -64,6 +66,7 @@ class ExperimentManager(object):
         n_jobs: int = 1,
         sampler: str = "tpe",
         pruner: str = "median",
+        optimization_log_path: Optional[str] = None,
         n_startup_trials: int = 0,
         n_evaluations: int = 1,
         truncate_last_trajectory: bool = False,
@@ -74,6 +77,7 @@ class ExperimentManager(object):
         verbose: int = 1,
         vec_env_type: str = "dummy",
         n_eval_envs: int = 1,
+        no_optim_plots: bool = False,
     ):
         super(ExperimentManager, self).__init__()
         self.algo = algo
@@ -87,6 +91,7 @@ class ExperimentManager(object):
         self.env_wrapper = None
         self.frame_stack = None
         self.seed = seed
+        self.optimization_log_path = optimization_log_path
 
         self.vec_env_class = {"dummy": DummyVecEnv, "subproc": SubprocVecEnv}[vec_env_type]
 
@@ -113,6 +118,7 @@ class ExperimentManager(object):
         self.optimize_hyperparameters = optimize_hyperparameters
         self.storage = storage
         self.study_name = study_name
+        self.no_optim_plots = no_optim_plots
         # maximum number of trials for finding the best hyperparams
         self.n_trials = n_trials
         # number of parallel jobs when doing hyperparameter search
@@ -249,6 +255,7 @@ class ExperimentManager(object):
         saved_hyperparams = OrderedDict([(key, hyperparams[key]) for key in sorted(hyperparams.keys())])
 
         if self.verbose > 0:
+            print("Default hyperparameters for environment (ones being tuned will be overridden):")
             pprint(saved_hyperparams)
 
         return hyperparams, saved_hyperparams
@@ -348,7 +355,8 @@ class ExperimentManager(object):
         self, hyperparams: Dict[str, Any], saved_hyperparams: Dict[str, Any], env: VecEnv
     ) -> Dict[str, Any]:
         # Parse noise string
-        if self.algo in ["ddpg", "sac", "td3", "tqc"] and hyperparams.get("noise_type") is not None:
+        # Note: only off-policy algorithms are supported
+        if hyperparams.get("noise_type") is not None:
             noise_type = hyperparams["noise_type"].strip()
             noise_std = hyperparams["noise_std"]
 
@@ -423,7 +431,8 @@ class ExperimentManager(object):
 
     @staticmethod
     def is_robotics_env(env_id: str) -> bool:
-        return "gym.envs.robotics" in gym.envs.registry.env_specs[env_id].entry_point
+        entry_point = gym.envs.registry.env_specs[env_id].entry_point
+        return "gym.envs.robotics" in entry_point or "panda_gym.envs" in entry_point
 
     def _maybe_normalize(self, env: VecEnv, eval_env: bool) -> VecEnv:
         """
@@ -581,7 +590,8 @@ class ExperimentManager(object):
         if trial.using_her_replay_buffer:
             trial.her_kwargs = kwargs.get("replay_buffer_kwargs", {})
         # Sample candidate hyperparameters
-        kwargs.update(HYPERPARAMS_SAMPLER[self.algo](trial))
+        sampled_hyperparams = HYPERPARAMS_SAMPLER[self.algo](trial)
+        kwargs.update(sampled_hyperparams)
 
         model = ALGOS[self.algo](
             env=self.create_envs(self.n_envs, no_log=True),
@@ -594,17 +604,22 @@ class ExperimentManager(object):
 
         model.trial = trial
 
-        eval_env = self.create_envs(n_envs=1, eval_env=True)
+        eval_env = self.create_envs(n_envs=self.n_eval_envs, eval_env=True)
 
-        eval_freq = int(self.n_timesteps / self.n_evaluations)
+        optuna_eval_freq = int(self.n_timesteps / self.n_evaluations)
         # Account for parallel envs
-        eval_freq_ = max(eval_freq // model.get_env().num_envs, 1)
+        optuna_eval_freq = max(optuna_eval_freq // model.get_env().num_envs, 1)
         # Use non-deterministic eval for Atari
+        path = None
+        if self.optimization_log_path is not None:
+            path = os.path.join(self.optimization_log_path, f"trial_{str(trial.number)}")
         eval_callback = TrialEvalCallback(
             eval_env,
             trial,
+            best_model_save_path=path,
+            log_path=path,
             n_eval_episodes=self.n_eval_episodes,
-            eval_freq=eval_freq_,
+            eval_freq=optuna_eval_freq,
             deterministic=self.deterministic_eval,
         )
 
@@ -613,13 +628,16 @@ class ExperimentManager(object):
             # Free memory
             model.env.close()
             eval_env.close()
-        except AssertionError as e:
+        except (AssertionError, ValueError) as e:
             # Sometimes, random hyperparams can generate NaN
             # Free memory
             model.env.close()
             eval_env.close()
             # Prune hyperparams that generate NaNs
             print(e)
+            print("============")
+            print("Sampled hyperparams:")
+            pprint(sampled_hyperparams)
             raise optuna.exceptions.TrialPruned()
         is_pruned = eval_callback.is_pruned
         reward = eval_callback.last_mean_reward
@@ -682,7 +700,7 @@ class ExperimentManager(object):
 
         report_name = (
             f"report_{self.env_id}_{self.n_trials}-trials-{self.n_timesteps}"
-            f"-{self.sampler}-{self.pruner}_{int(time.time())}.csv"
+            f"-{self.sampler}-{self.pruner}_{int(time.time())}"
         )
 
         log_path = os.path.join(self.log_folder, self.algo, report_name)
@@ -692,4 +710,22 @@ class ExperimentManager(object):
 
         # Write report
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        study.trials_dataframe().to_csv(log_path)
+        study.trials_dataframe().to_csv(f"{log_path}.csv")
+
+        # Save python object to inspect/re-use it later
+        with open(f"{log_path}.pkl", "wb+") as f:
+            pkl.dump(study, f)
+
+        # Skip plots
+        if self.no_optim_plots:
+            return
+
+        # Plot optimization result
+        try:
+            fig1 = plot_optimization_history(study)
+            fig2 = plot_param_importances(study)
+
+            fig1.show()
+            fig2.show()
+        except (ValueError, ImportError, RuntimeError):
+            pass
