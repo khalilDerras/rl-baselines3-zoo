@@ -4,7 +4,7 @@ import argparse
 import numpy as np
 from itertools import count
 from utils import ALGOS, create_test_env, get_saved_hyperparams
-
+from stable_baselines3.common.evaluation import evaluate_policy
 
 def parse():
     parser = argparse.ArgumentParser()
@@ -45,7 +45,7 @@ def read_name(filename):
     return env_name, name[0], algo
 
 
-def get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparams):
+def get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparams, n_evals):
     """
     """
     env = create_test_env(
@@ -61,34 +61,8 @@ def get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparam
     fields = policy_file.split('.')
     model = ALGOS[algo].load(folder + "/" + fields[0], env)
     policy = model.policy
-    scores = evaluate_pol(env, policy, False)
-    return scores
-
-
-def evaluate_pol(env, policy, deterministic):
-    """
-    Function to evaluate a policy over 900 episodes
-    :param env: the evaluation environment
-    :param policy: the evaluated policy
-    :param deterministic: whether the evaluation uses a deterministic policy
-    :return: the obtained vector of 900 scores
-    """
-    scores = []
-    state = None
-    for i in range(100):
-        osb = env.reset()
-        total_reward = 0
-
-        for _ in count():
-            action, state = policy.predict(osb, state=state, deterministic=deterministic)
-            next_state, reward, done, _ = env.step(action)
-            total_reward += reward
-            osb = next_state
-
-            if done:
-                scores.append(total_reward)
-                break
-    scores = np.array(scores)
+    episode_rewards, _ = evaluate_policy(policy, env, n_eval_episodes=n_evals, return_episode_rewards=True)
+    scores = np.array(episode_rewards)
     return scores
 
 
@@ -109,16 +83,17 @@ class Evaluator:
         args = parse()
         stats_path = folder
         hyperparams, stats_path = get_saved_hyperparams(stats_path, norm_reward=args.norm_reward, test_mode=True)
+        n_evals = 100
 
         for policy_file in listdir:
             print(policy_file)
             env_name, team_name, algo = read_name(policy_file)
 
             if env_name in self.env_dic:
-                scores = get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparams)
+                scores = get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparams, n_evals)
                 self.score_dic[env_name][team_name] = [scores.mean(), scores.std()]
             else:
-                scores = get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparams)
+                scores = get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparams, n_evals)
                 tmp_dic = {team_name: [scores.mean(), scores.std()]}
                 self.score_dic[env_name] = tmp_dic
 
