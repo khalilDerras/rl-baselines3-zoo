@@ -405,7 +405,9 @@ class ExperimentManager(object):
         # Create test env if needed, do not normalize reward
         if self.eval_freq > 0 and not self.optimize_hyperparameters:
             # Account for the number of parallel environments
-            self.eval_freq = max(self.eval_freq // self.n_envs, 1)
+            # Special Case for CEM
+            if self.algo != "cem":
+                self.eval_freq = max(self.eval_freq // self.n_envs, 1)
 
             if self.verbose > 0:
                 print("Creating test environment")
@@ -561,7 +563,7 @@ class ExperimentManager(object):
             sampler = RandomSampler(seed=self.seed)
         elif sampler_method == "tpe":
             # TODO: try with multivariate=True
-            sampler = TPESampler(n_startup_trials=self.n_startup_trials, seed=self.seed)
+            sampler = TPESampler(n_startup_trials=self.n_startup_trials, seed=self.seed, multivariate=True)
         elif sampler_method == "skopt":
             # cf https://scikit-optimize.github.io/#skopt.Optimizer
             # GP: gaussian process
@@ -611,8 +613,14 @@ class ExperimentManager(object):
         eval_env = self.create_envs(n_envs=self.n_eval_envs, eval_env=True)
 
         optuna_eval_freq = int(self.n_timesteps / self.n_evaluations)
+
         # Account for parallel envs
         optuna_eval_freq = max(optuna_eval_freq // model.get_env().num_envs, 1)
+        # Special case for CEM, use nb_epochs
+        if self.algo == "cem":
+            assert model.nb_epochs is not None, "When using CEM, you must specify nb_epochs"
+            optuna_eval_freq = max(int(model.nb_epochs / self.n_evaluations), 1)
+
         # Use non-deterministic eval for Atari
         path = None
         if self.optimization_log_path is not None:

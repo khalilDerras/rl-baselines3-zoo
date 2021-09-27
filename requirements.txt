@@ -1,4 +1,4 @@
-stable-baselines3[extra,tests,docs]>=1.2.0
+git+https://github.com/osigaud/stable-baselines3
 box2d-py==2.3.8
 pybullet
 gym-minigrid
@@ -13,3 +13,4 @@ cloudpickle>=1.5.0
 atari-py==0.2.6
 plotly
 panda-gym
+git+https://github.com/sdsubhajitdas/Rocket_Lander_Gym
