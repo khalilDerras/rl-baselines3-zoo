@@ -50,7 +50,7 @@ def get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparam
     """
     env = create_test_env(
         env_name,
-        n_envs=1,
+        n_envs=10,
         stats_path=stats_path,
         seed=args.seed,
         log_dir=folder + "/../Logs",
@@ -59,7 +59,7 @@ def get_scores(args, folder, policy_file, env_name, algo, stats_path, hyperparam
         env_kwargs={},
     )
     fields = policy_file.split('.')
-    model = ALGOS[algo].load(folder + "/" + fields[0], env)
+    model = ALGOS[algo].load(folder + "/" + fields[0])
     policy = model.policy
     episode_rewards, _ = evaluate_policy(policy, env, n_eval_episodes=n_evals, return_episode_rewards=True)
     scores = np.array(episode_rewards)
