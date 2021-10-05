@@ -110,7 +110,8 @@ class Evaluator:
 
 
 if __name__ == '__main__':
-    directory = os.getcwd() + '/data/policies/'
+    directory = os.getcwd() + '/rl-baselines3-zoo/data/policies/'
+    
     ev = Evaluator()
     c = Chrono()
     ev.load_policies(directory)
